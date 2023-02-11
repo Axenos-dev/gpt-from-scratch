@@ -1,5 +1,5 @@
 import torch
-import torch.functional as F
+import torch.nn.functional as F
 from torch import nn
 
 
@@ -130,13 +130,13 @@ class GPT(nn.Module):
     
     def generate(self, idx, max_tokens: int):
         for _ in range(max_tokens):
-            idx_cond = idx[:, 1, :]
+            idx_cond = idx[:, -256:]
             
             logits, _ = self(idx_cond)
             logits = logits[:, -1, :]
             
-            probs = F.softmax(logits)
-            idx_next = torch.multinomial(probs, 1)
+            probs = F.softmax(logits, dim=-1)
+            idx_next = torch.multinomial(probs, num_samples=1)
             idx = torch.cat((idx, idx_next), dim=1)
 
         return idx
