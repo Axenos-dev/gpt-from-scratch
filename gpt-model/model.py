@@ -1,142 +1,105 @@
 import torch
+import torch.nn as nn
 import torch.nn.functional as F
-from torch import nn
 
-
-class Head(nn.Module):
-    def __init__(self, head_size: int, emb_dim: int, block_size: int):
-        super().__init__()
-        
-        # 384 - embedding size
-        self.query = nn.Linear(emb_dim, head_size)
-        self.key = nn.Linear(emb_dim, head_size)
-        self.value = nn.Linear(emb_dim, head_size)
-
-        self.register_buffer("tril", torch.tril(torch.ones(block_size, block_size)))
-
-        # setting dropout to prevent overfitting
-        self.dropout = nn.Dropout(0.1)
-
-    def forward(self, x):
-        _, timestep, _ = x.shape
-
-        key = self.key(x)
-        query = self.query(x)
-        value = self.value(x)
-
-        # attention = softmax((Q * K.T) / sqrt(keys of dimmention)) * V
-        attention = query @ key.transpose(-2, -1) * key.shape[-1]**-0.5
-        attention = attention.masked_fill(self.tril[:timestep, :timestep], float('-inf')) # applying mask
-        attention = F.softmax(attention, dim=-1)
-        attention = self.dropout(attention) # dropout to destroy some nodes
-        attention = attention @ value
-
-        return attention
-
-# masked multi-head attention block
 class MultiHeadAttention(nn.Module):
-    def __init__(self, num_heads: int, head_size: int, emb_dim: int, block_size: int):
-        super().__init__()
+    def __init__(self, num_heads: int, emb_dim: int):
+        super(MultiHeadAttention, self).__init__()
 
-        self.heads = nn.ModuleList([ Head(head_size=head_size, emb_dim=emb_dim, block_size=block_size) for _ in range(num_heads)])
-        self.projection = nn.Linear(head_size*num_heads, emb_dim)
-        self.dropout = nn.Dropout(0.1)
+        self.emb_dim = emb_dim
+        self.num_heads = num_heads
+        self.head_dim = emb_dim // num_heads
 
-    def forward(self, x):
-        output = torch.cat([ head(x) for head in self.heads ], dim=-1)
-        output = self.dropout(self.projection(output))
+        self.values = nn.Linear(emb_dim, emb_dim)
+        self.keys = nn.Linear(emb_dim, emb_dim)
+        self.query = nn.Linear(emb_dim, emb_dim)
 
-        return output
+        self.out = nn.Linear(emb_dim, emb_dim)
 
-class FeedForwardBlock(nn.Module):
-    def __init__(self, emb_dim: int):
-        super().__init__()
+    def forward(self, values, keys, query, mask=None):
+        values = self.values(values)
+        keys = self.keys(keys)
+        query = self.query(query)
 
-        self.block = nn.Sequential(
-            nn.Linear(emb_dim, 4 * emb_dim),
+        batch_size, seq_len, _ = values.shape
+
+        values = values.view(batch_size, seq_len, self.num_heads, self.head_dim)
+        keys = keys.view(batch_size, seq_len, self.num_heads, self.head_dim)
+        query = query.view(batch_size, seq_len, self.num_heads, self.head_dim)
+
+        attention = query @ keys.transpose(-2, -1) * self.head_dim**-0.5
+
+        if mask is not None: 
+            attention = attention.masked_fill(mask == 0, float('-inf'))
+
+        attention = F.softmax(attention, dim=-1)
+        attention = attention @ values
+
+        attention = attention.view(batch_size, seq_len, self.emb_dim)
+
+        return self.out(attention)
+
+
+class FeedForward(nn.Module):
+    def __init__(self, emb_dim):
+        super(FeedForward, self).__init__()
+
+        self.feedforward = nn.Sequential(
+            nn.Linear(emb_dim, 4*emb_dim),
             nn.ReLU(),
-            nn.Linear(4 * emb_dim, emb_dim),
+            nn.Linear(4*emb_dim, emb_dim),
             nn.Dropout(0.1)
         )
-    
+
     def forward(self, x):
-        return self.block(x)
+        return self.feedforward(x)
+
 
 class TransformerBlock(nn.Module):
-    def __init__(self, emb_dim: int, num_heads: int, block_size: int):
-        super().__init__()
-        
-        head_size = emb_dim // num_heads
-        
-        self.mha = MultiHeadAttention(num_heads, head_size, emb_dim, block_size)
-        self.ff = FeedForwardBlock(emb_dim)
-        
+    def __init__(self, emb_dim: int, num_heads: int):
+        super(TransformerBlock, self).__init__()
+
+        self.mha = MultiHeadAttention(num_heads, emb_dim)
         self.norm1 = nn.LayerNorm(emb_dim)
+
+        self.feedforward = FeedForward(emb_dim)
         self.norm2 = nn.LayerNorm(emb_dim)
-        
-    def forward(self, x):
-        # add + norm
-        x = x + self.mha(self.norm1(x))
-        x = x + self.ff(self.norm2(x))
-        
-        return x
-    
-class GPT(nn.Module):
-    def __init__(self, emb_dim: int, vocab_size: int, block_size: int, num_heads: int, num_layers: int):
-        super().__init__()
-        
-        self.token_embedding_table = nn.Embedding(vocab_size, emb_dim)
-        self.position_embadding_table = nn.Embedding(block_size, emb_dim)
-        
-        self.blocks = nn.Sequential(*[ TransformerBlock(emb_dim, num_heads, block_size) for _ in range(num_layers)])
-        
-        self.norm = nn.LayerNorm(emb_dim)
-        self.output = nn.Linear(emb_dim, vocab_size)
-        
-        self.apply(self._init_weights)
 
-    def _init_weights(self, module):
-        if isinstance(module, nn.Linear):
-            nn.init.normal_(module.weight, mean=0.0, std=0.2)
-            
-            if module.bias is None:
-                nn.init.zeros_(module.bias)    
-        
-        elif isinstance(module, nn.Embedding):
-            nn.init.normal_(module.weight, mean=0.0, std=0.2)
+        self.dropout = nn.Dropout(0.1)
 
-    def forward(self, idx, targets=None):
-        batch, timestep = idx.shape
-        
-        tok_emb = self.token_embedding_table(idx)
-        pos_emb = self.position_embadding_table(torch.arange(timestep))
-        
-        x = tok_emb + pos_emb
-        x = self.blocks(x)
-        x = self.norm(x)
-        
-        logits = self.output(x)
-        loss = None
-        
-        if targets is not None:
-            batch, timestep, channels = logits.shape
-            
-            logits = logits.view(batch*timestep, channels)
-            targets = targets.view(batch*timestep)
-            
-            loss = F.cross_entropy(logits, targets)
-        
-        return logits, loss
-    
-    def generate(self, idx, max_tokens: int):
-        for _ in range(max_tokens):
-            idx_cond = idx[:, -256:]
-            
-            logits, _ = self(idx_cond)
-            logits = logits[:, -1, :]
-            
-            probs = F.softmax(logits, dim=-1)
-            idx_next = torch.multinomial(probs, num_samples=1)
-            idx = torch.cat((idx, idx_next), dim=1)
+    def forward(self, values, keys, query, mask=None):
+        attention = self.mha(values, keys, query, mask)
 
-        return idx
+        x = self.dropout(self.norm1(attention + query))
+        forward = self.feedforward(x)
+
+        return self.dropout(self.norm2(forward + x))
+
+
+class Encoder(nn.Module):
+    def __init__(self, emb_dim: int, num_heads: int, num_layers: int, vocab_size: int, max_length: int):
+        super(Encoder, self).__init__()
+
+        self.emb_dim = emb_dim
+        
+        self.word_emb = nn.Embedding(vocab_size, emb_dim)
+        self.pos_emb = nn.Embedding(max_length, emb_dim)
+
+        self.blocks = nn.ModuleList([ TransformerBlock(emb_dim, num_heads) for _ in range(num_layers) ])
+
+        self.dropout = nn.Dropout(0.1)
+
+    def forward(self, x, mask=None):
+        batch_size, seq_len = x.shape
+
+        positions = torch.arange(0, seq_len).expand(batch_size, seq_len)
+
+        word_emb = self.word_emb(x)
+        pos_emb = self.pos_emb(positions)
+
+        out = self.dropout(word_emb + pos_emb)
+
+        for block in self.blocks:
+            out = block(out, out, out, mask)
+
+        return out
