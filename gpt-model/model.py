@@ -4,15 +4,15 @@ from torch import nn
 
 
 class Head(nn.Module):
-    def __init__(self, head_size: int):
+    def __init__(self, head_size: int, emb_dim: int, block_size: int):
         super().__init__()
         
         # 384 - embedding size
-        self.query = nn.Linear(384, head_size)
-        self.key = nn.Linear(384, head_size)
-        self.value = nn.Linear(384, head_size)
+        self.query = nn.Linear(emb_dim, head_size)
+        self.key = nn.Linear(emb_dim, head_size)
+        self.value = nn.Linear(emb_dim, head_size)
 
-        self.register_buffer("tril", torch.tril(torch.ones(256, 256)))
+        self.register_buffer("tril", torch.tril(torch.ones(block_size, block_size)))
 
         # setting dropout to prevent overfitting
         self.dropout = nn.Dropout(0.1)
@@ -35,11 +35,11 @@ class Head(nn.Module):
 
 # masked multi-head attention block
 class MultiHeadAttention(nn.Module):
-    def __init__(self, num_heads: int, head_size: int):
+    def __init__(self, num_heads: int, head_size: int, emb_dim: int, block_size: int):
         super().__init__()
 
-        self.heads = nn.ModuleList([ Head(head_size=head_size) for _ in range(num_heads)])
-        self.projection = nn.Linear(head_size*num_heads, 384)
+        self.heads = nn.ModuleList([ Head(head_size=head_size, emb_dim=emb_dim, block_size=block_size) for _ in range(num_heads)])
+        self.projection = nn.Linear(head_size*num_heads, emb_dim)
         self.dropout = nn.Dropout(0.1)
 
     def forward(self, x):
@@ -53,9 +53,9 @@ class FeedForwardBlock(nn.Module):
         super().__init__()
 
         self.block = nn.Sequential(
-            nn.Linear(384, 4 * 384),
+            nn.Linear(emb_dim, 4 * emb_dim),
             nn.ReLU(),
-            nn.Linear(4 * 384, 384),
+            nn.Linear(4 * emb_dim, emb_dim),
             nn.Dropout(0.1)
         )
     
@@ -63,12 +63,12 @@ class FeedForwardBlock(nn.Module):
         return self.block(x)
 
 class TransformerBlock(nn.Module):
-    def __init__(self, emb_dim: int, num_heads: int):
+    def __init__(self, emb_dim: int, num_heads: int, block_size: int):
         super().__init__()
         
         head_size = emb_dim // num_heads
         
-        self.mha = MultiHeadAttention(num_heads, head_size)
+        self.mha = MultiHeadAttention(num_heads, head_size, emb_dim, block_size)
         self.ff = FeedForwardBlock(emb_dim)
         
         self.norm1 = nn.LayerNorm(emb_dim)
@@ -88,7 +88,7 @@ class GPT(nn.Module):
         self.token_embedding_table = nn.Embedding(vocab_size, emb_dim)
         self.position_embadding_table = nn.Embedding(block_size, emb_dim)
         
-        self.blocks = nn.Sequential(*[ TransformerBlock(emb_dim, num_heads) for _ in range(num_layers)])
+        self.blocks = nn.Sequential(*[ TransformerBlock(emb_dim, num_heads, block_size) for _ in range(num_layers)])
         
         self.norm = nn.LayerNorm(emb_dim)
         self.output = nn.Linear(emb_dim, vocab_size)
