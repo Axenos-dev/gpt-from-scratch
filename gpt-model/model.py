@@ -2,6 +2,7 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 
+
 class MultiHeadAttention(nn.Module):
     def __init__(self, num_heads: int, emb_dim: int):
         super(MultiHeadAttention, self).__init__()
@@ -29,7 +30,7 @@ class MultiHeadAttention(nn.Module):
 
         attention = query @ keys.transpose(-2, -1) * self.head_dim**-0.5
 
-        if mask is not None: 
+        if mask is not None:
             attention = attention.masked_fill(mask == 0, float('-inf'))
 
         attention = F.softmax(attention, dim=-1)
@@ -103,7 +104,8 @@ class Encoder(nn.Module):
             out = block(out, out, out, mask)
 
         return out
-    
+
+
 class DecoderBlock(nn.Module):
     def __init__(self, emb_dim: int, num_heads: int):
         super(DecoderBlock, self).__init__()
@@ -114,26 +116,27 @@ class DecoderBlock(nn.Module):
         self.norm = nn.LayerNorm(emb_dim)
         self.dropout = nn.Dropout(0.1)
         
-    def forward(self, x, value, key, src_mask, trg_mask):
-        attention = self.mha(x, x, x, trg_mask)
-        query = self.dropout(self.norm(x + attention))
+    def forward(self, query, value, key, src_mask, trg_mask):
+        attention = self.mha(value, key, query, trg_mask)
+        query = self.dropout(self.norm(attention + query))
         
         out = self.block(value, key, query, src_mask)
         
         return out
     
+
 class Decoder(nn.Module):
-    def __init__(self, trg_vocab_size: int, emb_dim: int, num_layers: int, num_heads: int, max_length: int):
+    def __init__(self, vocab_size: int, emb_dim: int, num_layers: int, num_heads: int, max_length: int):
         super(Decoder, self).__init__()
         
-        self.word_embedding = nn.Embedding(trg_vocab_size, emb_dim)
+        self.word_embedding = nn.Embedding(vocab_size, emb_dim)
         self.pos_embedding = nn.Embedding(max_length, emb_dim)
         
         self.blocks = nn.ModuleList([
             DecoderBlock(emb_dim, num_heads) for _ in range(num_layers)
         ])
         
-        self.out = nn.Linear(emb_dim, trg_vocab_size)
+        self.out = nn.Linear(emb_dim, vocab_size)
         
         self.dropout = nn.Dropout(0.1)
         
@@ -153,3 +156,48 @@ class Decoder(nn.Module):
         out = self.out(x)
         
         return out
+
+
+class Transformer(nn.Module):
+    def __init__(self, src_vocab_size: int, trg_vocab_size: int, emb_dim: int, num_layers: int, num_heads: int, max_length: int):
+        super(Transformer, self).__init__()
+        
+        self.encoder = Encoder(
+            emb_dim=emb_dim,
+            num_heads=num_heads,
+            num_layers=num_layers,
+            vocab_size=src_vocab_size,
+            max_length=max_length
+        )
+        
+        self.decoder = Decoder(
+            emb_dim=emb_dim,
+            num_heads=num_layers,
+            num_layers=num_layers,
+            vocab_size=trg_vocab_size,
+            max_length=max_length
+        )
+        
+        self.mask = torch.tril(torch.ones(num_heads, num_heads)) # tril mask shape: (block_size x block_size)
+    
+    def make_src_mask(self, src):
+        src_mask = (src != 0).unsqueeze(1).unsqueeze(2)
+        # (N, 1, 1, src_len)
+        return src_mask
+    
+    def forward(self, x, y):
+        encoder_output = self.encoder(x)
+        out = self.decoder(y, encoder_output, self.make_src_mask(x), self.mask)
+        
+        return out
+    
+model = Transformer(
+    emb_dim=384,
+    num_heads=6,
+    num_layers=6,
+    max_length=10,
+    src_vocab_size=10,
+    trg_vocab_size=10
+)
+
+print(model(torch.tensor([[1, 2, 4, 5, 6, 7]]), torch.tensor([[1, 2, 4, 5, 6, 7, 7]])).shape)
