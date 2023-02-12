@@ -103,3 +103,53 @@ class Encoder(nn.Module):
             out = block(out, out, out, mask)
 
         return out
+    
+class DecoderBlock(nn.Module):
+    def __init__(self, emb_dim: int, num_heads: int):
+        super(DecoderBlock, self).__init__()
+        
+        self.mha = MultiHeadAttention(num_heads=num_heads, emb_dim=emb_dim)
+        self.block = TransformerBlock(emb_dim, num_heads)
+        
+        self.norm = nn.LayerNorm(emb_dim)
+        self.dropout = nn.Dropout(0.1)
+        
+    def forward(self, x, value, key, src_mask, trg_mask):
+        attention = self.mha(x, x, x, trg_mask)
+        query = self.dropout(self.norm(x + attention))
+        
+        out = self.block(value, key, query, src_mask)
+        
+        return out
+    
+class Decoder(nn.Module):
+    def __init__(self, trg_vocab_size: int, emb_dim: int, num_layers: int, num_heads: int, max_length: int):
+        super(Decoder, self).__init__()
+        
+        self.word_embedding = nn.Embedding(trg_vocab_size, emb_dim)
+        self.pos_embedding = nn.Embedding(max_length, emb_dim)
+        
+        self.blocks = nn.ModuleList([
+            DecoderBlock(emb_dim, num_heads) for _ in range(num_layers)
+        ])
+        
+        self.out = nn.Linear(emb_dim, trg_vocab_size)
+        
+        self.dropout = nn.Dropout(0.1)
+        
+    def forward(self, x, encoder_output, src_mask, trg_mask):
+        batch_size, seq_len = x.shape
+        
+        positions = torch.arange(0, seq_len).expand(batch_size, seq_len)
+        
+        word_emb = self.word_embedding(x)
+        pos_emb = self.pos_embedding(positions)
+        
+        x = self.dropout(pos_emb + word_emb)
+        
+        for block in self.blocks:
+            x = block(x, encoder_output, encoder_output, src_mask, trg_mask)
+            
+        out = self.out(x)
+        
+        return out
